@@ -13,6 +13,7 @@ use std::process;
 struct Config {
     local_rpc: String,
     remote_rpc: String,
+    lag_threshold: u64,
     discord_webhook: String,
 }
 
@@ -20,9 +21,16 @@ impl Config {
     fn from_env() -> Self {
         dotenv().ok(); // Load .env file if present, ignore if file is missing
 
+         // Helper to parse optional u64, defaulting to 3
+        let lag_threshold = env::var("LAG_THRESHOLD")
+            .unwrap_or_else(|_| "3".to_string()) // Default to string "3"
+            .parse::<u64>()
+            .expect("LAG_THRESHOLD must be a valid number");
+
         Config {
             local_rpc: get_env("LOCAL_RPC_URL"),
             remote_rpc: get_env("REMOTE_RPC_URL"),
+            lag_threshold,
             discord_webhook: get_env("DISCORD_WEBHOOK_URL"),
         }
     }     
@@ -47,6 +55,7 @@ async fn main() {
     println!("Configuration Loaded. Starting Watchdog Loop...");
     println!("  Local Node:  {}", config.local_rpc);
     println!("  Remote Node: {}", config.remote_rpc);
+    println!("  Threshold:   {} blocks", config.lag_threshold);
     println!("  Webhook:     [REDACTED]");
 
     loop {
@@ -61,7 +70,7 @@ async fn main() {
             (Ok(remote), Ok(local)) => {
                 if local <= remote {
                     let lag = remote - local;
-                    if lag < 3 {
+                    if lag < config.lag_threshold {
                         // Healthy 
                         println!("Synced! [Lag: {}] | Local: {} | Remote: {}", lag, local, remote);
                     } else {
