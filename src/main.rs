@@ -65,50 +65,47 @@ async fn main() {
     println!("  Webhook:     [REDACTED]");
 
     loop {
-        // Fetch remote 
         let remote_result = fetch_block_number(&client, &config.remote_rpc).await;
-
-        // Fetch local
         let local_result = fetch_block_number(&client, &config.local_rpc).await;
 
-        // Compare and report
         match (remote_result, local_result) {
 
-            // HEALTHY
+            // HEALTHY: Both RPCs responded
             (Ok(remote), Ok(local)) => {
                 if local <= remote {
                     let lag = remote - local;
                     if lag < config.lag_threshold {
-                        println!("Synced! [Lag: {}]", lag);
+                        // All good: Print to terminal only
+                        println!("[OK] Synced [Lag: {}]", lag);
                     } else {
-                        // ALERT: Lagging
-                        let msg = format!("ALERT: Node lagging! [Lag: {}] | Local: {} | Remote: {}", lag, local, remote);
+                        // Problem: Lagging too far behind
+                        let msg = format!("🚨[WARN] NODE LAGGING! Lag: {} blocks | Local: {} | Remote: {}", lag, local, remote);
                         println!("{}", msg);
                         
-                        // Fire and forget (we log errors if the alert fails, but don't crash)
+                        // Send Alert to Discord
                         if let Err(e) = send_alert(&client, &config.discord_webhook, &msg).await {
-                            eprintln!("Failed to send Discord alert: {}", e);    
+                            eprintln!("Error: Failed to send Discord alert: {}", e);    
                         }
                     }
                 } else {
-                        // Local ahead, during a reorg or if remote is slow 
-                        println!("Local is ahead | Local: {} | Remote: {}", local, remote);
+                        // Local ahead: a reorg or if remote is slow 
+                        println!("[INFO] Local is ahead | Local: {} | Remote: {}", local, remote);
                     }
             }
 
-            // REMOTE DIED
+            // REMOTE DIED: Skip health check (SoT is lost)
             (Err(e), _) => {
-                // If the remote fails, we can't judge health
-                eprintln!("FAILED to fetch Remote RPC: {}", e);
+                eprintln!("[ERROR] FAILED to fetch Remote RPC: {}", e);
             }
 
-            // LOCAL DIED
+            // LOCAL DIED: Node is down
             (Ok(_), Err(e)) => {
-                let msg = format!("🚨 LOCAL NODE DOWN! Error: {}", e);
+                let msg = format!("🚨[CRITICAL] LOCAL NODE DOWN! Error: {}", e);
                 eprintln!("{}", msg);
 
+                // Send Alert to Discord
                 if let Err(e) = send_alert(&client, &config.discord_webhook, &msg).await {
-                    eprintln!("Failed to send Discord alert: {}", e);
+                    eprintln!("Error: Failed to send Discord alert: {}", e);
             }
         }
     }
