@@ -4,7 +4,7 @@
 use std::time::Duration;
 use std::env;
 use dotenvy::dotenv;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::process;
 
 // --- Data Structures & Configuration ---
@@ -41,6 +41,12 @@ struct RpcResponse {
     result: String,
 }
 
+/// Represents the JSON payload sent to Discord
+#[derive(Serialize)]
+struct DiscordBody {
+    content: String,
+}
+
 
 // --- Main Execution ---
 
@@ -67,31 +73,45 @@ async fn main() {
 
         // Compare and report
         match (remote_result, local_result) {
+
+            // HEALTHY
             (Ok(remote), Ok(local)) => {
                 if local <= remote {
                     let lag = remote - local;
                     if lag < config.lag_threshold {
-                        // Healthy 
-                        println!("Synced! [Lag: {}] | Local: {} | Remote: {}", lag, local, remote);
+                        println!("Synced! [Lag: {}]", lag);
                     } else {
-                        // Lagging 
-                        println!("Node lagging! [Lag: {}] | Local: {} | Remote: {}", lag, local, remote);
+                        // ALERT: Lagging
+                        let msg = format!("ALERT: Node lagging! [Lag: {}] | Local: {} | Remote: {}", lag, local, remote);
+                        println!("{}", msg);
+                        
+                        // Fire and forget (we log errors if the alert fails, but don't crash)
+                        if let Err(e) = send_alert(&client, &config.discord_webhook, &msg).await {
+                            eprintln!("Failed to send Discord alert: {}", e);    
+                        }
                     }
                 } else {
-                    // Local ahead, during a reorg or if remote is slow 
-                    println!("Local is ahead (or remote is behind) | Local: {} | Remote: {}", local, remote);
-                }
+                        // Local ahead, during a reorg or if remote is slow 
+                        println!("Local is ahead | Local: {} | Remote: {}", local, remote);
+                    }
             }
+
+            // REMOTE DIED
             (Err(e), _) => {
                 // If the remote fails, we can't judge health
                 eprintln!("FAILED to fetch Remote RPC: {}", e);
             }
+
+            // LOCAL DIED
             (Ok(_), Err(e)) => {
-                // If local failed, we can't judge health
-                eprintln!("LOCAL NODE DOWN: {}", e);
-                // TODO: Alerting 
+                let msg = format!("🚨 LOCAL NODE DOWN! Error: {}", e);
+                eprintln!("{}", msg);
+
+                if let Err(e) = send_alert(&client, &config.discord_webhook, &msg).await {
+                    eprintln!("Failed to send Discord alert: {}", e);
             }
         }
+    }
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
 }
@@ -127,4 +147,22 @@ async fn fetch_block_number(client: &reqwest::Client, url: &str) -> Result<u64, 
     let block_number = u64::from_str_radix(hex_str, 16)?;
 
     Ok(block_number)
+}
+
+async fn send_alert(client: &reqwest::Client, url: &str, message: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // If the URL is empty or the placeholder, don't try to send
+    if url.is_empty() || url.contains("REDACTED") {
+        return Ok(());
+    }
+
+    let payload = DiscordBody {
+        content: message.to_string(),
+    };
+
+    client.post(url)
+        .json(&payload)
+        .send()
+        .await?;
+
+    Ok(())
 }
