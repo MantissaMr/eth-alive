@@ -2,6 +2,11 @@
 name = "eth-alive"
 version = "0.1.0"
 edition = "2024"
+description = "A minimalist watchdog for Ethereum node monitoring"
+license = "MIT"
+repository = "https://github.com/MantissaMr/eth-alive"
+keywords = ["ethereum", "node", "rpc"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] } 
