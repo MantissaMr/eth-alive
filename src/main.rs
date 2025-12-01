@@ -6,6 +6,7 @@ use std::env;
 use dotenvy::dotenv;
 use serde::{Deserialize, Serialize};
 use std::process;
+use chrono::{DateTime, Utc};
 
 // --- Data Structures & Configuration ---
 
@@ -55,7 +56,6 @@ async fn main() {
     println!("eth-alive daemon starting up...");
 
     let config = Config::from_env();
-
     let client = reqwest::Client::new();
 
     println!("Configuration Loaded. Starting Watchdog Loop...");
@@ -64,10 +64,13 @@ async fn main() {
     println!("  Threshold:   {} blocks", config.lag_threshold);
     println!("  Webhook:     [REDACTED]");
 
+
+    let mut last_alert_time: Option<DateTime<Utc>> = None;
+    let alert_cooldown = chrono::Duration::seconds(30); // Change to minutes in production, use Duration::minutes(15)
+
     loop {
         let remote_result = fetch_block_number(&client, &config.remote_rpc).await;
         let local_result = fetch_block_number(&client, &config.local_rpc).await;
-
         match (remote_result, local_result) {
 
             // HEALTHY: Both RPCs responded
@@ -77,15 +80,13 @@ async fn main() {
                     if lag < config.lag_threshold {
                         // All good: Print to terminal only
                         println!("[OK] Synced [Lag: {}]", lag);
+                        last_alert_time = None;
                     } else {
                         // Problem: Lagging too far behind
                         let msg = format!("🚨[WARN] NODE LAGGING! Lag: {} blocks | Local: {} | Remote: {}", lag, local, remote);
                         println!("{}", msg);
-                        
-                        // Send Alert to Discord
-                        if let Err(e) = send_alert(&client, &config.discord_webhook, &msg).await {
-                            eprintln!("Error: Failed to send Discord alert: {}", e);    
-                        }
+
+                        process_alert(&client, &config.discord_webhook, &msg, &mut last_alert_time, alert_cooldown).await;   
                     }
                 } else {
                         // Local ahead: a reorg or if remote is slow 
@@ -103,10 +104,7 @@ async fn main() {
                 let msg = format!("🚨[CRITICAL] LOCAL NODE DOWN! Error: {}", e);
                 eprintln!("{}", msg);
 
-                // Send Alert to Discord
-                if let Err(e) = send_alert(&client, &config.discord_webhook, &msg).await {
-                    eprintln!("Error: Failed to send Discord alert: {}", e);
-            }
+                process_alert(&client, &config.discord_webhook, &msg, &mut last_alert_time, alert_cooldown).await;
         }
     }
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -162,4 +160,27 @@ async fn send_alert(client: &reqwest::Client, url: &str, message: &str) -> Resul
         .await?;
 
     Ok(())
+}
+
+/// Checks cooldown logic and sends an alert if necessary. Updates last_alert_time.
+async fn process_alert(
+    client: &reqwest::Client,
+    webhook_url: &str,
+    message: &str,
+    last_alert_time: &mut Option<DateTime<Utc>>, 
+    cooldown: chrono::Duration,
+) {
+    // Check if we should alert
+    let should_alert = match last_alert_time {
+        None => true,
+        Some(last) => Utc::now() - *last > cooldown, 
+    };
+
+    if should_alert {
+        if let Err(e) = send_alert(client, webhook_url, message).await {
+            eprintln!("Error: Failed to send Discord alert: {}", e);
+        } else {
+            *last_alert_time = Some(Utc::now());
+        }
+    }
 }
