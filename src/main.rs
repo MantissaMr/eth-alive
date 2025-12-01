@@ -7,6 +7,7 @@ use dotenvy::dotenv;
 use serde::{Deserialize, Serialize};
 use std::process;
 use chrono::{DateTime, Utc};
+use colored::Colorize;
 
 // --- Data Structures & Configuration ---
 
@@ -15,6 +16,8 @@ struct Config {
     local_rpc: String,
     remote_rpc: String,
     lag_threshold: u64,
+    alert_cooldown_minutes: u64,
+    poll_interval_seconds: u64,
     discord_webhook: String,
 }
 
@@ -22,16 +25,29 @@ impl Config {
     fn from_env() -> Self {
         dotenv().ok(); // Load .env file if present, ignore if file is missing
 
-         // Helper to parse optional u64, defaulting to 3
+        // optional LAG_THRESHOLD (u64), defaulting to 3
         let lag_threshold = env::var("LAG_THRESHOLD")
             .unwrap_or_else(|_| "3".to_string()) // Default to string "3"
             .parse::<u64>()
             .expect("LAG_THRESHOLD must be a valid number");
+        
+        // optional ALERT_COOLDOWN_MINUTES u64, defaulting to 15
+        let alert_cooldown_minutes = env::var("ALERT_COOLDOWN_MINUTES")
+            .unwrap_or_else(|_| "15".to_string())
+            .parse::<u64>()
+            .expect("ALERT_COOLDOWN_MINUTES must be a valid number");
+        // optional POLL_INTERVAL_SECONDS u64, defaulting to 60 secs 
+        let poll_interval_seconds = env::var("POLL_INTERVAL_SECONDS")
+            .unwrap_or_else(|_| "60".to_string())
+            .parse::<u64>()
+            .expect("POLL_INTERVAL_SECONDS must be a valid number");
 
         Config {
             local_rpc: get_env("LOCAL_RPC_URL"),
             remote_rpc: get_env("REMOTE_RPC_URL"),
             lag_threshold,
+            alert_cooldown_minutes,
+            poll_interval_seconds,
             discord_webhook: get_env("DISCORD_WEBHOOK_URL"),
         }
     }     
@@ -59,14 +75,15 @@ async fn main() {
     let client = reqwest::Client::new();
 
     println!("Configuration Loaded. Starting Watchdog Loop...");
-    println!("  Local Node:  {}", config.local_rpc);
-    println!("  Remote Node: {}", config.remote_rpc);
-    println!("  Threshold:   {} blocks", config.lag_threshold);
-    println!("  Webhook:     [REDACTED]");
-
+    println!("{}", "-------------------------------------------------".dimmed());
+    println!("  Local Node:        {}", config.local_rpc);
+    println!("  Remote Node:       {}", config.remote_rpc);
+    println!("  Threshold:         {} blocks", config.lag_threshold);
+    println!("  Notif Cooldown:    {} minutes", config.alert_cooldown_minutes); 
+    println!("  Polling:           Every {} seconds", config.poll_interval_seconds);
 
     let mut last_alert_time: Option<DateTime<Utc>> = None;
-    let alert_cooldown = chrono::Duration::seconds(30); // Change to minutes in production, use Duration::minutes(15)
+    let alert_cooldown = chrono::Duration::minutes(config.alert_cooldown_minutes as i64);
 
     loop {
         let remote_result = fetch_block_number(&client, &config.remote_rpc).await;
@@ -79,18 +96,20 @@ async fn main() {
                     let lag = remote - local;
                     if lag < config.lag_threshold {
                         // All good: Print to terminal only
-                        println!("[OK] Synced [Lag: {}]", lag);
+                        println!("[OK] Synced | Block: {} | Lag: {}", local, lag);
                         last_alert_time = None;
                     } else {
                         // Problem: Lagging too far behind
-                        let msg = format!("🚨[WARN] NODE LAGGING! Lag: {} blocks | Local: {} | Remote: {}", lag, local, remote);
+                        let msg = format!("🚨[WARN] NODE LAGGING! Local: {} | Remote: {} | Lag: {} blocks", local, remote, lag);
                         println!("{}", msg);
 
+                        // Send alert, with cooldown check
                         process_alert(&client, &config.discord_webhook, &msg, &mut last_alert_time, alert_cooldown).await;   
                     }
                 } else {
                         // Local ahead: a reorg or if remote is slow 
-                        println!("[INFO] Local is ahead | Local: {} | Remote: {}", local, remote);
+                        let lead = local - remote; 
+                        println!("[INFO] Local is ahead | Local: {} | Remote: {} | Lead: {}", local, remote, lead);
                     }
             }
 
@@ -105,9 +124,9 @@ async fn main() {
                 eprintln!("{}", msg);
 
                 process_alert(&client, &config.discord_webhook, &msg, &mut last_alert_time, alert_cooldown).await;
+            }
         }
-    }
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(config.poll_interval_seconds)).await;
     }
 }
 
@@ -162,7 +181,7 @@ async fn send_alert(client: &reqwest::Client, url: &str, message: &str) -> Resul
     Ok(())
 }
 
-/// Checks cooldown logic and sends an alert if necessary. Updates last_alert_time.
+/// Checks cooldown logic and sends an alert if necessary. Updates last_alert_time
 async fn process_alert(
     client: &reqwest::Client,
     webhook_url: &str,
