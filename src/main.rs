@@ -153,12 +153,8 @@ async fn fetch_block_number(client: &reqwest::Client, url: &str) -> Result<u64, 
         .send()
         .await?;
 
-    // Parse the JSON answer into our struct
-    let rpc_resp: RpcResponse = resp.json().await?;
-
-    // Parse hex string (e.g., "0x10a") into u64
-    let hex_str = rpc_resp.result.trim_start_matches("0x");
-    let block_number = u64::from_str_radix(hex_str, 16)?;
+    let rpc_resp: RpcResponse = resp.json().await?; // Parse the JSON answer into our struct
+    let block_number = parse_hex_to_u64(&rpc_resp.result)?;
 
     Ok(block_number)
 }
@@ -201,5 +197,56 @@ async fn process_alert(
         } else {
             *last_alert_time = Some(Utc::now());
         }
+    }
+}
+
+/// Converts a hex string (with or without '0x' prefix) to u64
+fn parse_hex_to_u64(hex: &str) -> Result<u64, std::num::ParseIntError> {
+    let clean_hex = hex.trim_start_matches("0x");
+    u64::from_str_radix(clean_hex, 16)
+}
+
+
+// --- TESTS ---
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hex_parsing_with_prefix() {
+        // 0x10a = 266
+        let input = "0x10a";
+        let result = parse_hex_to_u64(input);
+        assert_eq!(result.unwrap(), 266);
+    }
+
+    #[test]
+    fn test_hex_parsing_without_prefix() {
+        // 10a = 266
+        let input = "10a";
+        let result = parse_hex_to_u64(input);
+        assert_eq!(result.unwrap(), 266);
+    }
+
+    #[test]
+    fn test_hex_parsing_uppercase() {
+        // 0x10A = 266
+        let input = "0x10A";
+        let result = parse_hex_to_u64(input);
+        assert_eq!(result.unwrap(), 266);
+    }
+
+    #[test]
+    fn test_hex_parsing_zero() {
+        let input = "0x0";
+        let result = parse_hex_to_u64(input);
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_invalid_hex() {
+        let input = "0xZZZ"; // Not a hex number
+        let result = parse_hex_to_u64(input);
+        assert!(result.is_err());
     }
 }
