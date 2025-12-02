@@ -4,10 +4,12 @@
 use std::time::Duration;
 use std::env;
 use dotenvy::dotenv;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde_json::Value; 
 use std::process;
 use chrono::{DateTime, Utc};
 use colored::Colorize;
+use url::Url;
 
 // --- Data Structures & Configuration ---
 
@@ -53,11 +55,6 @@ impl Config {
     }     
 }
 
-#[derive(Deserialize, Debug)]
-struct RpcResponse {
-    result: String,
-}
-
 /// Represents the JSON payload sent to Discord
 #[derive(Serialize)]
 struct DiscordBody {
@@ -72,12 +69,15 @@ async fn main() {
     println!("eth-alive daemon starting up...");
 
     let config = Config::from_env();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to build HTTP client");
 
     println!("Configuration Loaded. Starting Watchdog Loop...");
     println!("{}", "-------------------------------------------------".dimmed());
-    println!("  Local Node:        {}", config.local_rpc);
-    println!("  Remote Node:       {}", config.remote_rpc);
+    println!("  Local Node:        {}", redact_url(&config.local_rpc));
+    println!("  Remote Node:       {}", redact_url(&config.remote_rpc));
     println!("  Threshold:         {} blocks", config.lag_threshold);
     println!("  Notif Cooldown:    {} minutes", config.alert_cooldown_minutes); 
     println!("  Polling:           Every {} seconds", config.poll_interval_seconds);
@@ -132,6 +132,7 @@ async fn main() {
 
 // --- Helpers ---
 
+/// Fetches an environment variable or exits if not found
 fn get_env (key: &str) -> String {
     env::var(key).unwrap_or_else(|_| {
         eprintln!("Error: Required environment variable '{}' not set.", key);
@@ -148,17 +149,34 @@ async fn fetch_block_number(client: &reqwest::Client, url: &str) -> Result<u64, 
         "id": 1
     });
 
+    // Send Request & Check HTTP Status
     let resp = client.post(url)
         .json(&payload)
         .send()
-        .await?;
+        .await?
+        .error_for_status()?;
 
-    let rpc_resp: RpcResponse = resp.json().await?; // Parse the JSON answer into our struct
-    let block_number = parse_hex_to_u64(&rpc_resp.result)?;
+    // Parse as Generic JSON Value
+    let body: Value = resp.json().await?;
+
+    // Check for RPC error
+    if let Some(err) = body.get("error") {
+        let err_msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown RPC error");
+        return Err(format!("RPC Error: {}", err_msg).into());
+    }
+    
+    // Extract result 
+    let result_str = body.get("result")
+        .and_then(|v| v.as_str())
+        .ok_or("Invalid response: 'result' field missing or not a string")?;
+    
+    // Parse Hex
+    let block_number = parse_hex_to_u64(result_str)?;
 
     Ok(block_number)
 }
 
+/// Sends a Discord alert via webhook
 async fn send_alert(client: &reqwest::Client, url: &str, message: &str) -> Result<(), Box<dyn std::error::Error>> {
     // If the URL is empty or the placeholder, don't try to send
     if url.is_empty() || url.contains("REDACTED") {
@@ -204,6 +222,23 @@ async fn process_alert(
 fn parse_hex_to_u64(hex: &str) -> Result<u64, std::num::ParseIntError> {
     let clean_hex = hex.trim_start_matches("0x");
     u64::from_str_radix(clean_hex, 16)
+}
+
+/// Hides the path/query of a URL to prevent leaking API keys in logs.
+/// Input: https://eth-mainnet.alchemyapi.io/v2/SECRET
+/// Output: https://eth-mainnet.alchemyapi.io/[REDACTED]
+
+fn redact_url(url_str: &str) -> String {
+    match Url::parse(url_str) {
+        Ok(u) => {
+            if u.has_host() {
+                format!("{}://{}/[REDACTED]", u.scheme(), u.host_str().unwrap_or("unknown"))
+            } else {
+                "[INVALID URL]".to_string()
+            }
+        },
+        Err(_) => "[INVALID URL]".to_string(),
+    }
 }
 
 
