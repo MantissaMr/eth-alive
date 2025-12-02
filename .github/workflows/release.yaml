@@ -1,4 +1,4 @@
-name: Release Workflow for eth-alive
+name: Release
 
 permissions:
   contents: write
